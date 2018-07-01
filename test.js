@@ -15,8 +15,12 @@ const user = {
   const q = 'SELECT spttoken FROM users';
   const { rows } = await client.query(q);
   const accessToken = rows[0].spttoken;
+  const start = new Date();
 
   createUserPlaylist.handler({ user, accessToken }, null, (err) => {
+    const end = new Date();
+    console.log(`Total Execution Time: ${(end.getTime() - start.getTime()) / 1000}`);
+
     if (err) {
       console.error(err);
       return process.exit(1);

@@ -1,7 +1,6 @@
 const { SPOTIFY_CLIENTID, SPOTIFY_SECRET, SEATGEEK_API_KEY } = process.env;
 const fetch = require('node-fetch');
-const { Pool } = require('pg');
-const pool = new Pool();
+const { Client, Pool } = require('pg');
 
 const seatgeekApiUrl = 'https://api.seatgeek.com/2';
 const seatgeekAuth = `client_id=${SEATGEEK_API_KEY}`;
@@ -12,6 +11,8 @@ const spotify = new Spotify({
   clientId: SPOTIFY_CLIENTID,
   clientSecret: SPOTIFY_SECRET,
 });
+
+let userId;
 
 // Helper
 function setToMondayOfNextWeek(date) {
@@ -47,7 +48,7 @@ function getArtists(user) {
         const eventData = await fetch(sgUrl);
         const eventDataJson = await eventData.json();
         const { events } = eventDataJson;
-        console.log('length: ', events.length);
+
         eventsList = eventsList.concat(events);
       } catch (err) {
         return reject(err);
@@ -68,11 +69,10 @@ function getArtists(user) {
 /**
  * Get spotiify tracks from artists list
  */
-function getTracks(client, artists, user) {
+function getTracks(artists, user) {
   return new Promise(async (resolve, reject) => {
     const trackPromises = [];
 
-    let userId;
     let tracks = [];
     let trackDBPromises;
 
@@ -81,9 +81,14 @@ function getTracks(client, artists, user) {
       const userIdQuery = 'SELECT id FROM users WHERE username = $1';
       const userValues = [user.username];
 
+      const client = new Client();
+      await client.connect();
       const { rows } = await client.query(userIdQuery, userValues);
+      console.log('after query');
       if (!rows[0]) return reject(new Error('User not found'));
+
       userId = rows[0].id;
+      await client.end();
     } catch (err) {
       return reject(err);
     }
@@ -94,20 +99,25 @@ function getTracks(client, artists, user) {
       const playlistQuery = 'INSERT INTO playlists(sptusername, userid) VALUES ($1, $2) RETURNING id';
       const playlistValues = [user.username, userId];
 
+      const client = new Client();
+      await client.connect();
       const newPlaylistRows = await client.query(playlistQuery, playlistValues);
       [newPlaylist] = newPlaylistRows.rows;
+      await client.end();
     } catch (err) {
       return reject(err);
     }
 
+
     Object.keys(artists).forEach((eventId) => {
+      const toptracksClient = new Pool();
       artists[eventId].forEach((artist) => {
         trackPromises.push(new Promise(async (artistResolve, artistReject) => {
           // Search seetgeek artist on spotify
           let spotifyArtist;
           try {
             const artistsSearch = await spotify.searchArtists(artist.name);
-            console.log('artistsSearch: ', artistsSearch);
+            // console.log('artistsSearch: ', artistsSearch);
             [spotifyArtist] = artistsSearch.body.artists.items;
           } catch (err) {
             console.error('artist search err: ', err);
@@ -140,10 +150,17 @@ function getTracks(client, artists, user) {
 
                 const trackValues = [t.name, t.href, t.id, t.uri, artistsIdMap, t.album.id, eventId, newPlaylist.id];
 
-                return client.query(trackQuery, trackValues);
+                return toptracksClient.query(trackQuery, trackValues);
               });
 
-              return artistResolve();
+              try {
+                await Promise.all(trackDBPromises);
+                await toptracksClient.end();
+                return artistResolve();
+              } catch (err) {
+                console.error(err);
+                return reject(err);
+              }
             }
           }
 
@@ -154,12 +171,6 @@ function getTracks(client, artists, user) {
     });
     try {
       await Promise.all(trackPromises);
-    } catch (err) {
-      console.error(err);
-      return reject(err);
-    }
-    try {
-      await Promise.all(trackDBPromises);
       return resolve(tracks);
     } catch (err) {
       console.error(err);
@@ -178,8 +189,8 @@ function createPlaylist(user, tracks) {
         return resolve(user.playlistId);
       }
 
+      // Create spotify playlist
       const createData = await spotify.createPlaylist(user.username, 'Upcoming Artists In Your City', { public: false });
-      console.log('after createData: ', createData);
       const playlist = createData.body;
 
       await spotify.addTracksToPlaylist(user.username, playlist.id, tracks);
@@ -199,24 +210,27 @@ async function main(event, context, callback) {
 
   spotify.setAccessToken(accessToken);
 
-  const client = await pool.connect();
+  // const oldQueryFunc = client.query;
+  // query = (q, v) => {
+  //   // wrap client.query to log all queries to console
+  //   console.log('QUERY: ', q, v);
+  //   return oldQueryFunc.apply(client, [q, v]);
+  // };
 
-  const oldQueryFunc = client.query;
-  client.query = (q, v) => {
-    // wrap client.query to log all queries to console
-    console.log('QUERY: ', q, v);
-    return oldQueryFunc.apply(client, [q, v]);
-  };
-
+  const artistTimeStart = new Date();
   try {
     artists = await getArtists(user);
+    console.log(`Get Artists time: ${(new Date().getTime() - artistTimeStart.getTime()) / 1000}`);
   } catch (err) {
     console.error('Error getting artists: ', err);
     return callback(err);
   }
 
+  const tracksTime = new Date();
   try {
-    tracks = await getTracks(client, artists, user);
+    console.log('get tracks');
+    tracks = await getTracks(artists, user);
+    console.log(`Get Tracks time: ${(new Date().getTime() - tracksTime.getTime()) / 1000}`);
     if (!tracks) {
       console.error('Tracks undefined');
       return process.exit(1);
@@ -226,8 +240,19 @@ async function main(event, context, callback) {
     return callback(err);
   }
 
+  const playlistTime = new Date();
   try {
     const playlistId = await createPlaylist(user, tracks);
+    console.log(`Create playlist time: ${(new Date().getTime() - playlistTime.getTime()) / 1000}`);
+    console.log('PLAYLIST: ', playlistId);
+    // Add playlist id to user row
+    const pidUserQuery = 'UPDATE users SET playlistid = $1 WHERE id = $2';
+    const pidUserValues = [playlistId, user.id];
+    const client = new Client();
+    await client.connect();
+    await client.query(pidUserQuery, pidUserValues);
+
+    await client.end();
     return callback(null, playlistId);
   } catch (err) {
     console.error(err);
