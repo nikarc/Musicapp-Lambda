@@ -95,17 +95,19 @@ function getTracks(artists, user) {
 
     // Save playlist info to db
     let newPlaylist;
-    try {
-      const playlistQuery = 'INSERT INTO playlists(sptusername, userid) VALUES ($1, $2) RETURNING id';
-      const playlistValues = [user.username, userId];
+    if (!user.playlistid) {
+      try {
+        const playlistQuery = 'INSERT INTO playlists(sptusername, userid) VALUES ($1, $2) RETURNING id';
+        const playlistValues = [user.username, userId];
 
-      const client = new Client();
-      await client.connect();
-      const newPlaylistRows = await client.query(playlistQuery, playlistValues);
-      [newPlaylist] = newPlaylistRows.rows;
-      await client.end();
-    } catch (err) {
-      return reject(err);
+        const client = new Client();
+        await client.connect();
+        const newPlaylistRows = await client.query(playlistQuery, playlistValues);
+        [newPlaylist] = newPlaylistRows.rows;
+        await client.end();
+      } catch (err) {
+        return reject(err);
+      }
     }
 
 
@@ -147,8 +149,8 @@ function getTracks(artists, user) {
                                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`;
 
                 const artistsIdMap = t.artists.map(a => a.id).join(':');
-
-                const trackValues = [t.name, t.href, t.id, t.uri, artistsIdMap, t.album.id, eventId, newPlaylist.id];
+                const playlistId = newPlaylist ? newPlaylist.id : user.playlistid;
+                const trackValues = [t.name, t.href, t.id, t.uri, artistsIdMap, t.album.id, eventId, playlistId];
 
                 return toptracksClient.query(trackQuery, trackValues);
               });
@@ -179,14 +181,29 @@ function getTracks(artists, user) {
   });
 }
 
-function createPlaylist(user, tracks) {
+function createPlaylist(user, tracks, accessToken) {
   return new Promise(async (resolve, reject) => {
     try {
       if (user.playlistid) {
-        console.log('replace playlist tracks');
-        const replaceData = await spotify.replaceTracksInPlaylist(user.username, user.playlistId, tracks);
-        console.log('Data: ', replaceData);
-        return resolve(user.playlistId);
+        console.log('replace playlist tracks: ', user.playlistid);
+        // const replaceData = await spotify.replaceTracksInPlaylist(user.username, user.playlistId, tracks);
+        const replaceResponse = await fetch(`https://api.spotify.com/v1/users/${user.username}/playlists/${user.playlistid}/tracks`, {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            uris: tracks,
+          }),
+        });
+        const replaceJson = await replaceResponse.json();
+
+        if (!replaceResponse.ok) {
+          return reject(replaceJson);
+        }
+        console.log('Data: ', replaceJson);
+        return resolve(user.playlistid);
       }
 
       // Create spotify playlist
@@ -242,7 +259,7 @@ async function main(event, context, callback) {
 
   const playlistTime = new Date();
   try {
-    const playlistId = await createPlaylist(user, tracks);
+    const playlistId = await createPlaylist(user, tracks, accessToken);
     console.log(`Create playlist time: ${(new Date().getTime() - playlistTime.getTime()) / 1000}`);
     console.log('PLAYLIST: ', playlistId);
     // Add playlist id to user row
