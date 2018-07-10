@@ -136,7 +136,7 @@ function getTracks(artists, user) {
             }
 
             if (topTracks.length) {
-              const tracksSlice = topTracks.slice(0, 3);
+              const tracksSlice = topTracks.slice(0, 2);
               // Map top tracks to Spotify URI format. Use URI to add to playlist
               tracks = tracks.concat(tracksSlice.map(t => `spotify:track:${t.id}`));
 
@@ -182,7 +182,7 @@ function getTracks(artists, user) {
 function createPlaylist(user, tracks) {
   return new Promise(async (resolve, reject) => {
     try {
-      if (user.playlistId) {
+      if (user.playlistid) {
         console.log('replace playlist tracks');
         const replaceData = await spotify.replaceTracksInPlaylist(user.username, user.playlistId, tracks);
         console.log('Data: ', replaceData);
