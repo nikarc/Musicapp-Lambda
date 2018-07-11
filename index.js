@@ -67,14 +67,41 @@ function getArtists(user) {
 }
 
 /**
+ *
+ * @param {Object} user User object
+ *
+ * Creates a new playlist for user
+ */
+function createPlaylist(user) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      // Create spotify playlist
+      const createData = await spotify.createPlaylist(user.username, 'Upcoming Artists In Your City', { public: false });
+      const playlist = createData.body;
+
+      const client = new Client();
+      await client.connect();
+      await client.query('UPDATE users SET sptplaylistid = $1 WHERE id = $2', [playlist.id, user.id]);
+      await client.end();
+
+      return resolve(playlist.id);
+    } catch (err) {
+      console.error('ERROR: ', err);
+      return reject(err);
+    }
+  });
+}
+
+/**
  * Get spotiify tracks from artists list
  */
-function getTracks(artists, user) {
+function getTracks(artists, user, accessToken, sptPlaylistId) {
   return new Promise(async (resolve, reject) => {
     const trackPromises = [];
 
     let tracks = [];
     let trackDBPromises;
+    let playlistId;
 
     try {
       // Get user id from postgres db
@@ -149,7 +176,8 @@ function getTracks(artists, user) {
                                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`;
 
                 const artistsIdMap = t.artists.map(a => a.id).join(':');
-                const playlistId = newPlaylist ? newPlaylist.id : user.playlistid;
+                playlistId = newPlaylist ? newPlaylist.id : user.playlistid;
+                console.log('playlistId before insert track: ', playlistId);
                 const trackValues = [t.name, t.href, t.id, t.uri, artistsIdMap, t.album.id, eventId, playlistId];
 
                 return toptracksClient.query(trackQuery, trackValues);
@@ -173,21 +201,11 @@ function getTracks(artists, user) {
     });
     try {
       await Promise.all(trackPromises);
-      return resolve(tracks);
-    } catch (err) {
-      console.error(err);
-      return reject(err);
-    }
-  });
-}
 
-function createPlaylist(user, tracks, accessToken) {
-  return new Promise(async (resolve, reject) => {
-    try {
       if (user.playlistid) {
-        console.log('replace playlist tracks: ', user.playlistid);
+        console.log('replace playlist tracks: ', user.sptplaylistid);
         // const replaceData = await spotify.replaceTracksInPlaylist(user.username, user.playlistId, tracks);
-        const replaceResponse = await fetch(`https://api.spotify.com/v1/users/${user.username}/playlists/${user.playlistid}/tracks`, {
+        const replaceResponse = await fetch(`https://api.spotify.com/v1/users/${user.username}/playlists/${user.sptplaylistid}/tracks`, {
           method: 'PUT',
           headers: {
             Authorization: `Bearer ${accessToken}`,
@@ -205,15 +223,12 @@ function createPlaylist(user, tracks, accessToken) {
         console.log('Data: ', replaceJson);
         return resolve(user.playlistid);
       }
-
-      // Create spotify playlist
-      const createData = await spotify.createPlaylist(user.username, 'Upcoming Artists In Your City', { public: false });
-      const playlist = createData.body;
-
-      await spotify.addTracksToPlaylist(user.username, playlist.id, tracks);
-      return resolve(playlist.id);
+      console.log('playlist id: ', user.username, playlistId, tracks);
+      await spotify.addTracksToPlaylist(user.username, sptPlaylistId, tracks);
+      console.log('after add tracks to playlist');
+      return resolve(tracks);
     } catch (err) {
-      console.error('ERROR: ', err);
+      console.error(err);
       return reject(err);
     }
   });
@@ -243,23 +258,10 @@ async function main(event, context, callback) {
     return callback(err);
   }
 
-  const tracksTime = new Date();
-  try {
-    console.log('get tracks');
-    tracks = await getTracks(artists, user);
-    console.log(`Get Tracks time: ${(new Date().getTime() - tracksTime.getTime()) / 1000}`);
-    if (!tracks) {
-      console.error('Tracks undefined');
-      return process.exit(1);
-    }
-  } catch (err) {
-    console.error(err);
-    return callback(err);
-  }
-
   const playlistTime = new Date();
+  let playlistId;
   try {
-    const playlistId = await createPlaylist(user, tracks, accessToken);
+    playlistId = await createPlaylist(user, tracks, accessToken);
     console.log(`Create playlist time: ${(new Date().getTime() - playlistTime.getTime()) / 1000}`);
     console.log('PLAYLIST: ', playlistId);
     // Add playlist id to user row
@@ -270,6 +272,21 @@ async function main(event, context, callback) {
     await client.query(pidUserQuery, pidUserValues);
 
     await client.end();
+  } catch (err) {
+    console.error(err);
+    return callback(err);
+  }
+
+  const tracksTime = new Date();
+  try {
+    console.log('get tracks');
+    tracks = await getTracks(artists, user, accessToken, playlistId);
+    console.log(`Get Tracks time: ${(new Date().getTime() - tracksTime.getTime()) / 1000}`);
+    if (!tracks) {
+      console.error('Tracks undefined');
+      return callback(new Error('Tracks undefined'));
+    }
+
     return callback(null, playlistId);
   } catch (err) {
     console.error(err);
