@@ -1,6 +1,6 @@
 const { SPOTIFY_CLIENTID, SPOTIFY_SECRET, SEATGEEK_API_KEY } = process.env;
 const fetch = require('node-fetch');
-const { Client, Pool } = require('pg');
+const { Pool } = require('pg');
 
 const seatgeekApiUrl = 'https://api.seatgeek.com/2';
 const seatgeekAuth = `client_id=${SEATGEEK_API_KEY}`;
@@ -72,17 +72,15 @@ function getArtists(user) {
  *
  * Creates a new playlist for user
  */
-function createPlaylist(user) {
+function createPlaylist(user, client) {
   return new Promise(async (resolve, reject) => {
     try {
       // Create spotify playlist
       const createData = await spotify.createPlaylist(user.username, 'Upcoming Artists In Your City', { public: false });
       const playlist = createData.body;
 
-      const client = new Client();
       await client.connect();
       await client.query('UPDATE users SET sptplaylistid = $1 WHERE id = $2', [playlist.id, user.id]);
-      await client.end();
 
       return resolve(playlist.id);
     } catch (err) {
@@ -95,7 +93,7 @@ function createPlaylist(user) {
 /**
  * Get spotiify tracks from artists list
  */
-function getTracks(artists, user, accessToken, sptPlaylistId) {
+function getTracks(artists, user, accessToken, sptPlaylistId, client) {
   return new Promise(async (resolve, reject) => {
     const trackPromises = [];
 
@@ -108,14 +106,11 @@ function getTracks(artists, user, accessToken, sptPlaylistId) {
       const userIdQuery = 'SELECT id FROM users WHERE username = $1';
       const userValues = [user.username];
 
-      const client = new Client();
-      await client.connect();
       const { rows } = await client.query(userIdQuery, userValues);
       console.log('after query');
       if (!rows[0]) return reject(new Error('User not found'));
 
       userId = rows[0].id;
-      await client.end();
     } catch (err) {
       return reject(err);
     }
@@ -127,11 +122,8 @@ function getTracks(artists, user, accessToken, sptPlaylistId) {
         const playlistQuery = 'INSERT INTO playlists(sptusername, userid) VALUES ($1, $2) RETURNING id';
         const playlistValues = [user.username, userId];
 
-        const client = new Client();
-        await client.connect();
         const newPlaylistRows = await client.query(playlistQuery, playlistValues);
         [newPlaylist] = newPlaylistRows.rows;
-        await client.end();
       } catch (err) {
         return reject(err);
       }
@@ -242,16 +234,19 @@ async function main(event, context, callback) {
 
   spotify.setAccessToken(accessToken);
 
-  // const oldQueryFunc = client.query;
-  // query = (q, v) => {
-  //   // wrap client.query to log all queries to console
-  //   console.log('QUERY: ', q, v);
-  //   return oldQueryFunc.apply(client, [q, v]);
-  // };
+  const pool = new Pool();
+  const client = await pool.connect();
+
+  const oldQueryFunc = client.query;
+  client.query = (q, v) => {
+    // wrap client.query to log all queries to console
+    console.log('QUERY: ', q, v);
+    return oldQueryFunc.apply(client, [q, v]);
+  };
 
   const artistTimeStart = new Date();
   try {
-    artists = await getArtists(user);
+    artists = await getArtists(user, client);
     console.log(`Get Artists time: ${(new Date().getTime() - artistTimeStart.getTime()) / 1000}`);
   } catch (err) {
     console.error('Error getting artists: ', err);
@@ -261,17 +256,14 @@ async function main(event, context, callback) {
   const playlistTime = new Date();
   let playlistId;
   try {
-    playlistId = await createPlaylist(user, tracks, accessToken);
+    playlistId = await createPlaylist(user, tracks, accessToken, client);
     console.log(`Create playlist time: ${(new Date().getTime() - playlistTime.getTime()) / 1000}`);
     console.log('PLAYLIST: ', playlistId);
     // Add playlist id to user row
     const pidUserQuery = 'UPDATE users SET playlistid = $1 WHERE id = $2';
     const pidUserValues = [playlistId, user.id];
-    const client = new Client();
-    await client.connect();
-    await client.query(pidUserQuery, pidUserValues);
 
-    await client.end();
+    await client.query(pidUserQuery, pidUserValues);
   } catch (err) {
     console.error(err);
     return callback(err);
@@ -280,7 +272,7 @@ async function main(event, context, callback) {
   const tracksTime = new Date();
   try {
     console.log('get tracks');
-    tracks = await getTracks(artists, user, accessToken, playlistId);
+    tracks = await getTracks(artists, user, accessToken, playlistId, client);
     console.log(`Get Tracks time: ${(new Date().getTime() - tracksTime.getTime()) / 1000}`);
     if (!tracks) {
       console.error('Tracks undefined');
@@ -291,6 +283,8 @@ async function main(event, context, callback) {
   } catch (err) {
     console.error(err);
     return callback(err);
+  } finally {
+    client.release();
   }
 }
 
