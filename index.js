@@ -1,6 +1,6 @@
 const { SPOTIFY_CLIENTID, SPOTIFY_SECRET, SEATGEEK_API_KEY } = process.env;
 const fetch = require('node-fetch');
-const { Pool } = require('pg');
+const { Client } = require('pg');
 
 const seatgeekApiUrl = 'https://api.seatgeek.com/2';
 const seatgeekAuth = `client_id=${SEATGEEK_API_KEY}`;
@@ -79,7 +79,6 @@ function createPlaylist(user, client) {
       const createData = await spotify.createPlaylist(user.username, 'Upcoming Artists In Your City', { public: false });
       const playlist = createData.body;
 
-      await client.connect();
       await client.query('UPDATE users SET sptplaylistid = $1 WHERE id = $2', [playlist.id, user.id]);
 
       return resolve(playlist.id);
@@ -124,6 +123,12 @@ function getTracks(artists, user, accessToken, sptPlaylistId, client) {
 
         const newPlaylistRows = await client.query(playlistQuery, playlistValues);
         [newPlaylist] = newPlaylistRows.rows;
+
+        // Add playlist id to user row
+        const pidUserQuery = 'UPDATE users SET playlistid = $1 WHERE id = $2';
+        const pidUserValues = [newPlaylist.id, user.id];
+
+        await client.query(pidUserQuery, pidUserValues);
       } catch (err) {
         return reject(err);
       }
@@ -131,7 +136,6 @@ function getTracks(artists, user, accessToken, sptPlaylistId, client) {
 
 
     Object.keys(artists).forEach((eventId) => {
-      const toptracksClient = new Pool();
       artists[eventId].forEach((artist) => {
         trackPromises.push(new Promise(async (artistResolve, artistReject) => {
           // Search seetgeek artist on spotify
@@ -172,12 +176,11 @@ function getTracks(artists, user, accessToken, sptPlaylistId, client) {
                 console.log('playlistId before insert track: ', playlistId);
                 const trackValues = [t.name, t.href, t.id, t.uri, artistsIdMap, t.album.id, eventId, playlistId];
 
-                return toptracksClient.query(trackQuery, trackValues);
+                return client.query(trackQuery, trackValues);
               });
 
               try {
                 await Promise.all(trackDBPromises);
-                await toptracksClient.end();
                 return artistResolve();
               } catch (err) {
                 console.error(err);
@@ -234,8 +237,8 @@ async function main(event, context, callback) {
 
   spotify.setAccessToken(accessToken);
 
-  const pool = new Pool();
-  const client = await pool.connect();
+  const client = new Client();
+  await client.connect();
 
   const oldQueryFunc = client.query;
   client.query = (q, v) => {
@@ -254,16 +257,10 @@ async function main(event, context, callback) {
   }
 
   const playlistTime = new Date();
-  let playlistId;
+  let sptPlaylistId;
   try {
-    playlistId = await createPlaylist(user, tracks, accessToken, client);
+    sptPlaylistId = await createPlaylist(user, client);
     console.log(`Create playlist time: ${(new Date().getTime() - playlistTime.getTime()) / 1000}`);
-    console.log('PLAYLIST: ', playlistId);
-    // Add playlist id to user row
-    const pidUserQuery = 'UPDATE users SET playlistid = $1 WHERE id = $2';
-    const pidUserValues = [playlistId, user.id];
-
-    await client.query(pidUserQuery, pidUserValues);
   } catch (err) {
     console.error(err);
     return callback(err);
@@ -272,20 +269,22 @@ async function main(event, context, callback) {
   const tracksTime = new Date();
   try {
     console.log('get tracks');
-    tracks = await getTracks(artists, user, accessToken, playlistId, client);
+    tracks = await getTracks(artists, user, accessToken, sptPlaylistId, client);
     console.log(`Get Tracks time: ${(new Date().getTime() - tracksTime.getTime()) / 1000}`);
     if (!tracks) {
       console.error('Tracks undefined');
       return callback(new Error('Tracks undefined'));
     }
-
-    return callback(null, playlistId);
   } catch (err) {
-    console.error(err);
+    console.error('TRACKS ERR: ', err);
     return callback(err);
   } finally {
-    client.release();
+    console.log('should release');
+    client.end();
   }
+
+  console.log('NO ERRORS');
+  return callback(null, sptPlaylistId);
 }
 
 exports.handler = main;
