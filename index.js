@@ -74,6 +74,7 @@ function getArtists(user) {
  */
 function createPlaylist(user, client) {
   return new Promise(async (resolve, reject) => {
+    if (user.sptplaylistid) return resolve(user.sptplaylistid);
     try {
       // Create spotify playlist
       const createData = await spotify.createPlaylist(user.username, 'Upcoming Artists In Your City', { public: false });
@@ -197,7 +198,7 @@ function getTracks(artists, user, accessToken, sptPlaylistId, client) {
     try {
       await Promise.all(trackPromises);
 
-      if (user.playlistid) {
+      if (user.playlistid !== null) {
         console.log('replace playlist tracks: ', user.sptplaylistid);
         // const replaceData = await spotify.replaceTracksInPlaylist(user.username, user.playlistId, tracks);
         const replaceResponse = await fetch(`https://api.spotify.com/v1/users/${user.username}/playlists/${user.sptplaylistid}/tracks`, {
