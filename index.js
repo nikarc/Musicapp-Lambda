@@ -74,11 +74,19 @@ function getArtists(user) {
  */
 function createPlaylist(user, client) {
   return new Promise(async (resolve, reject) => {
-    if (user.sptplaylistid) return resolve(user.sptplaylistid);
+    console.log('THE USER: ', JSON.stringify(user, null, 2));
+    const { sptplaylistid } = user;
+    console.log('LOOK HERE: ', sptplaylistid);
+    if (sptplaylistid) {
+      console.log('sptplaylistid is not null!!!');
+      return resolve(user.sptplaylistid);
+    }
     try {
+      console.log('create new playlist');
       // Create spotify playlist
       const createData = await spotify.createPlaylist(user.username, 'Upcoming Artists In Your City', { public: false });
       const playlist = createData.body;
+      console.log('PLAYLIST CREATE INFO: ', JSON.stringify(createData));
 
       await client.query('UPDATE users SET sptplaylistid = $1 WHERE id = $2', [playlist.id, user.id]);
 
@@ -96,6 +104,7 @@ function createPlaylist(user, client) {
 function getTracks(artists, user, accessToken, sptPlaylistId, client) {
   return new Promise(async (resolve, reject) => {
     const trackPromises = [];
+    const { playlistid } = user;
 
     let tracks = [];
     let trackDBPromises;
@@ -117,7 +126,7 @@ function getTracks(artists, user, accessToken, sptPlaylistId, client) {
 
     // Save playlist info to db
     let newPlaylist;
-    if (!user.playlistid) {
+    if (!playlistid) {
       try {
         const playlistQuery = 'INSERT INTO playlists(sptusername, userid) VALUES ($1, $2) RETURNING id';
         const playlistValues = [user.username, userId];
@@ -173,7 +182,7 @@ function getTracks(artists, user, accessToken, sptPlaylistId, client) {
                                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`;
 
                 const artistsIdMap = t.artists.map(a => a.id).join(':');
-                playlistId = newPlaylist ? newPlaylist.id : user.playlistid;
+                playlistId = newPlaylist ? newPlaylist.id : playlistid;
                 console.log('playlistId before insert track: ', playlistId);
                 const trackValues = [t.name, t.href, t.id, t.uri, artistsIdMap, t.album.id, eventId, playlistId];
 
@@ -198,7 +207,8 @@ function getTracks(artists, user, accessToken, sptPlaylistId, client) {
     try {
       await Promise.all(trackPromises);
 
-      if (user.playlistid !== null) {
+      if (user.playlistid !== null && user.sptplaylistid !== null) {
+        // Replace tracks if user already has a playlist
         console.log('replace playlist tracks: ', user.sptplaylistid);
         // const replaceData = await spotify.replaceTracksInPlaylist(user.username, user.playlistId, tracks);
         const replaceResponse = await fetch(`https://api.spotify.com/v1/users/${user.username}/playlists/${user.sptplaylistid}/tracks`, {
