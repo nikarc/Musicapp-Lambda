@@ -144,8 +144,33 @@ const insertTracksToDB = async (tracks, eventId, client) => {
   }
 };
 
-const addTracksToPlaylist = async (uris, username) => {
+const addTracksToPlaylist = async (uris, username, removeOldTracks = false) => {
   try {
+    // Remove old tracks if playlist already created
+    if (removeOldTracks) {
+      // First get query playlist and map track uris
+      const playlistRes = await fetch(`https://api.spotify.com/v1/users/${username}/playlists/${sptplaylistid}/tracks`, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+      const playlistJson = await playlistRes.json();
+
+      if (!playlistRes.ok) return Promise.reject(playlistJson);
+
+      // Map tracks
+      const removeTrackUris = playlistJson.items.map((t) => { return { uri: t.track.uri } });
+      console.log('REMOVE TRACKS URIS: ', removeTrackUris);
+
+      await fetch(`https://api.spotify.com/v1/users/${username}/playlists/${sptplaylistid}/tracks`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ tracks: removeTrackUris }),
+      });
+    }
     await fetch(`https://api.spotify.com/v1/users/${username}/playlists/${sptplaylistid}/tracks`, {
       method: 'POST',
       headers: {
@@ -162,7 +187,7 @@ const addTracksToPlaylist = async (uris, username) => {
   }
 };
 
-const getTracks = async function getTracks(client, artists, username) {
+const getTracks = async function getTracks(client, artists, username, playlistId) {
   // Iterate through artists and get top tracks
   // console.log('artists: ', artists);
   const sptArtists = [];
@@ -232,7 +257,7 @@ const getTracks = async function getTracks(client, artists, username) {
   try {
     await Promise.all(topTracksProimses);
     // Add tracks to spotify playlist
-    await addTracksToPlaylist(trackUris, username);
+    await addTracksToPlaylist(trackUris, username, !!playlistId);
   } catch (err) {
     console.error('Top tracks error: ', err);
     return Promise.reject();
@@ -285,7 +310,7 @@ const handler = async function handler(event, context, callback) {
 
   // Get Tracks
   try {
-    await getTracks(client, artists, dbUser.username);
+    await getTracks(client, artists, dbUser.username, dbUser.sptplaylistid);
   } catch (err) {
     client.end();
     return callback(err);
