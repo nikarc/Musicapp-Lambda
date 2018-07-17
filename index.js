@@ -5,14 +5,9 @@ const { Client } = require('pg');
 const seatgeekApiUrl = 'https://api.seatgeek.com/2';
 const seatgeekAuth = `client_id=${SEATGEEK_API_KEY}`;
 
-const Spotify = require('spotify-web-api-node');
-
-const spotify = new Spotify({
-  clientId: SPOTIFY_CLIENTID,
-  clientSecret: SPOTIFY_SECRET,
-});
-
-let userId;
+let sptplaylistid;
+let playlistId;
+let accessToken;
 
 // Helper
 function setToMondayOfNextWeek(date) {
@@ -29,225 +24,265 @@ function setToMondayOfNextWeek(date) {
   }
 }
 
-/**
- * Get artists for nearby venues
- */
-
-function getArtists(user) {
-  return new Promise(async (resolve, reject) => {
-    const date = new Date();
-    setToMondayOfNextWeek(date);
-    let eventsList = [];
-
-    for (let i = 0; i < 7; i += 1) {
-      if (i > 0) date.setDate(date.getDate() + 1);
-      const dateString = date.toISOString().split('T')[0];
-
-      try {
-        const sgUrl = `${seatgeekApiUrl}/events?venue.city=${user.city}&datetime_utc=${dateString}&taxonomies.name=concert&${seatgeekAuth}&per_page=5`;
-        const eventData = await fetch(sgUrl);
-        const eventDataJson = await eventData.json();
-        const { events } = eventDataJson;
-
-        eventsList = eventsList.concat(events);
-      } catch (err) {
-        return reject(err);
-      }
-    }
-
-    const artists = {};
-    eventsList.forEach((e) => {
-      const [performer] = e.performers;
-      if (!artists[e.id]) artists[e.id] = [];
-      artists[e.id].push(performer);
-    });
-
-    return resolve(artists);
-  });
-}
-
-/**
- *
- * @param {Object} user User object
- *
- * Creates a new playlist for user
- */
-function createPlaylist(user, client) {
-  return new Promise(async (resolve, reject) => {
-    console.log('THE USER: ', JSON.stringify(user, null, 2));
-    const { sptplaylistid } = user;
-    console.log('LOOK HERE: ', sptplaylistid);
-    if (sptplaylistid) {
-      console.log('sptplaylistid is not null!!!');
-      return resolve(user.sptplaylistid);
-    }
+const createPlaylist = async function createPlaylist(client, user) {
+  ({ sptplaylistid } = user);
+  const { username } = user;
+  if (!sptplaylistid) {
     try {
-      console.log('create new playlist');
       // Create spotify playlist
-      const createData = await spotify.createPlaylist(user.username, 'Upcoming Artists In Your City', { public: false });
-      const playlist = createData.body;
-      console.log('PLAYLIST CREATE INFO: ', JSON.stringify(createData));
-
-      await client.query('UPDATE users SET sptplaylistid = $1 WHERE id = $2', [playlist.id, user.id]);
-
-      return resolve(playlist.id);
-    } catch (err) {
-      console.error('ERROR: ', err);
-      return reject(err);
-    }
-  });
-}
-
-/**
- * Get spotiify tracks from artists list
- */
-function getTracks(artists, user, accessToken, sptPlaylistId, client) {
-  return new Promise(async (resolve, reject) => {
-    const trackPromises = [];
-    const { playlistid } = user;
-
-    let tracks = [];
-    let trackDBPromises;
-    let playlistId;
-
-    try {
-      // Get user id from postgres db
-      const userIdQuery = 'SELECT id FROM users WHERE username = $1';
-      const userValues = [user.username];
-
-      const { rows } = await client.query(userIdQuery, userValues);
-      console.log('after query');
-      if (!rows[0]) return reject(new Error('User not found'));
-
-      userId = rows[0].id;
-    } catch (err) {
-      return reject(err);
-    }
-
-    // Save playlist info to db
-    let newPlaylist;
-    if (!playlistid) {
-      try {
-        const playlistQuery = 'INSERT INTO playlists(sptusername, userid) VALUES ($1, $2) RETURNING id';
-        const playlistValues = [user.username, userId];
-
-        const newPlaylistRows = await client.query(playlistQuery, playlistValues);
-        [newPlaylist] = newPlaylistRows.rows;
-
-        // Add playlist id to user row
-        const pidUserQuery = 'UPDATE users SET playlistid = $1 WHERE id = $2';
-        const pidUserValues = [newPlaylist.id, user.id];
-
-        await client.query(pidUserQuery, pidUserValues);
-      } catch (err) {
-        return reject(err);
-      }
-    }
-
-
-    Object.keys(artists).forEach((eventId) => {
-      artists[eventId].forEach((artist) => {
-        trackPromises.push(new Promise(async (artistResolve, artistReject) => {
-          // Search seetgeek artist on spotify
-          let spotifyArtist;
-          try {
-            const artistsSearch = await spotify.searchArtists(artist.name);
-            // console.log('artistsSearch: ', artistsSearch);
-            [spotifyArtist] = artistsSearch.body.artists.items;
-          } catch (err) {
-            console.error('artist search err: ', err);
-            return artistReject(err);
-          }
-
-          if (spotifyArtist) {
-            let topTracks;
-            try {
-              // If artist is on Spotify, get top tracks
-              const topTracksRes = await spotify.getArtistTopTracks(spotifyArtist.id, 'US');
-              topTracks = topTracksRes.body.tracks;
-            } catch (err) {
-              console.error(err);
-              return artistReject(err);
-            }
-
-            if (topTracks.length) {
-              const tracksSlice = topTracks.slice(0, 2);
-              // Map top tracks to Spotify URI format. Use URI to add to playlist
-              tracks = tracks.concat(tracksSlice.map(t => `spotify:track:${t.id}`));
-
-              // Create tracks in postgres db
-              trackDBPromises = tracksSlice.map((t) => {
-                const trackQuery = `INSERT INTO
-                                        tracks(title, href, sptid, uri, sptartistsids, sptalbumsids, seatgeekeventid, playlist)
-                                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`;
-
-                const artistsIdMap = t.artists.map(a => a.id).join(':');
-                playlistId = newPlaylist ? newPlaylist.id : playlistid;
-                console.log('playlistId before insert track: ', playlistId);
-                const trackValues = [t.name, t.href, t.id, t.uri, artistsIdMap, t.album.id, eventId, playlistId];
-
-                return client.query(trackQuery, trackValues);
-              });
-
-              try {
-                await Promise.all(trackDBPromises);
-                return artistResolve();
-              } catch (err) {
-                console.error(err);
-                return reject(err);
-              }
-            }
-          }
-
-          // Artist is not on Spotify, ignore
-          return artistResolve();
-        }));
+      const sptPlaylistRes = await fetch(`https://api.spotify.com/v1/users/${username}/playlists`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: 'Upcoming Artists In Your Area',
+          public: false,
+        }),
       });
-    });
-    try {
-      await Promise.all(trackPromises);
+      const sptPlaylistJson = await sptPlaylistRes.json();
 
-      if (user.playlistid !== null && user.sptplaylistid !== null) {
-        // Replace tracks if user already has a playlist
-        console.log('replace playlist tracks: ', user.sptplaylistid);
-        // const replaceData = await spotify.replaceTracksInPlaylist(user.username, user.playlistId, tracks);
-        const replaceResponse = await fetch(`https://api.spotify.com/v1/users/${user.username}/playlists/${user.sptplaylistid}/tracks`, {
-          method: 'PUT',
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            uris: tracks,
-          }),
-        });
-        const replaceJson = await replaceResponse.json();
+      if (!sptPlaylistRes.ok) return Promise.reject(sptPlaylistJson);
+      console.log('PLAYLIST: ', sptPlaylistJson.id);
 
-        if (!replaceResponse.ok) {
-          return reject(replaceJson);
-        }
-        console.log('Data: ', replaceJson);
-        return resolve(user.playlistid);
-      }
-      console.log('playlist id: ', user.username, playlistId, tracks);
-      await spotify.addTracksToPlaylist(user.username, sptPlaylistId, tracks);
-      console.log('after add tracks to playlist');
-      return resolve(tracks);
+      sptplaylistid = sptPlaylistJson.id;
     } catch (err) {
-      console.error(err);
-      return reject(err);
+      console.error('Create spotify playlist error: ', err);
+      return Promise.reject(err);
+    }
+  }
+  try {
+    playlistId = user.playlistid;
+    if (!user.playlistid) {
+      // Check if playlist exists
+      const { rows: existingRows } = await client.query('SELECT id FROM playlists WHERE sptusername = $1', [username]);
+      const [existingPlaylist] = existingRows;
+
+      if (!existingPlaylist) {
+        // Create db playlist
+        const { rows } = await client.query('INSERT INTO playlists (userid, sptusername, sptplaylistid) VALUES ($1, $2, $3) ON CONFLICT (sptusername) DO NOTHING RETURNING id', [user.id, username, sptplaylistid]);
+        const [playlist] = rows;
+        playlistId = playlist.id;
+      } else {
+        playlistId = existingPlaylist.id;
+      }
+    }
+
+    // update user
+    await client.query('UPDATE users SET sptplaylistid = $1, playlistid = $2', [sptplaylistid, playlistId]);
+
+    return Promise.resolve(sptplaylistid);
+  } catch (err) {
+    console.error('Create playlist db error: ', err);
+    return Promise.reject(err);
+  }
+};
+
+const getArtists = async function getArtists(client, user) {
+  let eventsList = [];
+  const date = new Date();
+  setToMondayOfNextWeek(date);
+
+  // Iterate through every day next week and create a seatgeek url
+  const eventUrls = [];
+  for (let i = 0; i < 7; i += 1) {
+    if (i > 0) date.setDate(date.getDate() + 1);
+    const dateString = date.toISOString().split('T')[0];
+    eventUrls.push(`${seatgeekApiUrl}/events?venue.city=${user.city}&datetime_utc=${dateString}&taxonomies.name=concert&${seatgeekAuth}&per_page=5`);
+  }
+
+  // Make call to seatgeek with urls
+  const eventPromises = eventUrls.map(async (sgUrl) => {
+    try {
+      const eventData = await fetch(sgUrl);
+      const eventDataJson = await eventData.json();
+      const { events } = eventDataJson;
+
+      eventsList = eventsList.concat(events);
+      return Promise.resolve();
+    } catch (err) {
+      console.error('Event fetch error: ', err);
+      return Promise.reject(err);
     }
   });
-}
 
-async function main(event, context, callback) {
-  const { user, accessToken } = event;
+  try {
+    await Promise.all(eventPromises);
+  } catch (err) {
+    console.error('eventPromises error: ', err);
+    return Promise.reject(err);
+  }
 
-  let artists;
-  let tracks;
+  // Format artists from eventsList
+  const artists = {};
+  eventsList.forEach((e) => {
+    const [performer] = e.performers;
+    if (!artists[e.id]) artists[e.id] = [];
+    artists[e.id].push(performer);
+  });
 
-  spotify.setAccessToken(accessToken);
+  return Promise.resolve(artists);
+};
 
+// Get and insert tracks
+const insertTracksToDB = async (tracks, eventId, client) => {
+  const insertPromises = tracks.map(async (t) => {
+    try {
+      const { rows: oldTracksRows } = await client.query('SELECT id FROM tracks WHERE playlist = $1', [playlistId]);
+      const q = `INSERT INTO
+                    tracks(title, href, sptid, uri, sptartistsids, sptalbumsids, seatgeekeventid, playlist)
+                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`;
+
+      const artistsIdMap = t.artists.map(a => a.id).join(':');
+      const values = [t.name, t.href, t.id, t.uri, artistsIdMap, t.album.id, eventId, playlistId];
+      await client.query(q, values);
+
+      // Remove old tracks
+      const removeValues = oldTracksRows.map(i => i.id).join(',');
+      console.log('REMOVE VALUES: ', removeValues);
+      client.query('DELETE FROM tracks WHERE id IN ()', [removeValues]);
+
+      return Promise.resolve();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  });
+
+  try {
+    await Promise.all(insertPromises);
+    return Promise.resolve();
+  } catch (err) {
+    console.error('Insert tracks error: ', err);
+    return Promise.reject(err);
+  }
+};
+
+const addTracksToPlaylist = async (uris, username, removeOldTracks = false) => {
+  try {
+    // Remove old tracks if playlist already created
+    if (removeOldTracks) {
+      // First get query playlist and map track uris
+      const playlistRes = await fetch(`https://api.spotify.com/v1/users/${username}/playlists/${sptplaylistid}/tracks`, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+      const playlistJson = await playlistRes.json();
+
+      if (!playlistRes.ok) return Promise.reject(playlistJson);
+
+      // Map tracks
+      const removeTrackUris = playlistJson.items.map((t) => { return { uri: t.track.uri } });
+      console.log('REMOVE TRACKS URIS: ', removeTrackUris);
+
+      await fetch(`https://api.spotify.com/v1/users/${username}/playlists/${sptplaylistid}/tracks`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ tracks: removeTrackUris }),
+      });
+    }
+    await fetch(`https://api.spotify.com/v1/users/${username}/playlists/${sptplaylistid}/tracks`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ uris }),
+    });
+
+    return Promise.resolve();
+  } catch (err) {
+    console.error('Add tracks to playlist error: ', err);
+    return Promise.reject(err);
+  }
+};
+
+const getTracks = async function getTracks(client, artists, username, playlistId) {
+  // Iterate through artists and get top tracks
+  // console.log('artists: ', artists);
+  const sptArtists = [];
+  const trackPromises = Object.keys(artists).map(async (eventId) => {
+    const [a] = artists[eventId];
+    const searchQuery = `artist:${encodeURIComponent(a.name)}&type=artist`;
+    const url = `https://api.spotify.com/v1/search?q=${searchQuery}`;
+    console.log('the url: ', url);
+    const artistSearchRes = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+    const artistSearchJson = await artistSearchRes.json();
+
+    if (!artistSearchRes.ok) {
+      console.error('Artist search error: ', artistSearchJson);
+      return Promise.reject(artistSearchJson);
+    }
+
+    const artist = artistSearchJson.artists.items[0];
+    if (artist) {
+      artist.eventId = eventId;
+      sptArtists.push(artist);
+    }
+    return Promise.resolve();
+  });
+
+  try {
+    await Promise.all(trackPromises);
+  } catch (err) {
+    console.error('trackPromises Error: ', err);
+    return Promise.reject(err);
+  }
+
+  // Get top 2 tracks for each artist
+  let trackUris = [];
+  console.log('spt artist length: ', sptArtists.length);
+  const topTracksProimses = sptArtists.map(async (a) => {
+    try {
+      const topTracksRes = await fetch(`https://api.spotify.com/v1/artists/${a.id}/top-tracks?country=US`, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+      const topTracksJson = await topTracksRes.json();
+
+      if (!topTracksRes.ok) {
+        return Promise.reject(topTracksJson);
+      }
+
+      const { tracks } = topTracksJson;
+      if (!(tracks && tracks.length)) return Promise.resolve();
+
+      const trackSlice = tracks.slice(0, 2);
+      // Map track uris to use when adding to playlist
+      trackUris = trackUris.concat(trackSlice.map(t => `spotify:track:${t.id}`));
+      // insert tracks into db
+      await insertTracksToDB(trackSlice, a.eventId, client);
+
+      return Promise.resolve();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  });
+  try {
+    await Promise.all(topTracksProimses);
+    // Add tracks to spotify playlist
+    await addTracksToPlaylist(trackUris, username, !!playlistId);
+  } catch (err) {
+    console.error('Top tracks error: ', err);
+    return Promise.reject();
+  }
+
+  return Promise.resolve();
+};
+
+const handler = async function handler(event, context, callback) {
+  const { user } = event;
+  let dbUser;
   const client = new Client();
   await client.connect();
 
@@ -258,44 +293,49 @@ async function main(event, context, callback) {
     return oldQueryFunc.apply(client, [q, v]);
   };
 
-  const artistTimeStart = new Date();
-  try {
-    artists = await getArtists(user, client);
-    console.log(`Get Artists time: ${(new Date().getTime() - artistTimeStart.getTime()) / 1000}`);
-  } catch (err) {
-    console.error('Error getting artists: ', err);
-    return callback(err);
-  }
+  let artists;
 
-  const playlistTime = new Date();
-  let sptPlaylistId;
+  // Get user from db
   try {
-    sptPlaylistId = await createPlaylist(user, client);
-    console.log(`Create playlist time: ${(new Date().getTime() - playlistTime.getTime()) / 1000}`);
+    const { rows } = await client.query('SELECT * FROM users WHERE username = $1', [user.username]);
+    [dbUser] = rows;
   } catch (err) {
     console.error(err);
     return callback(err);
   }
 
-  const tracksTime = new Date();
+  ({ spttoken: accessToken } = dbUser);
+
+  // Create Playlist
   try {
-    console.log('get tracks');
-    tracks = await getTracks(artists, user, accessToken, sptPlaylistId, client);
-    console.log(`Get Tracks time: ${(new Date().getTime() - tracksTime.getTime()) / 1000}`);
-    if (!tracks) {
-      console.error('Tracks undefined');
-      return callback(new Error('Tracks undefined'));
-    }
+    await createPlaylist(client, dbUser);
+    console.log('PLAYLIST CREATED');
   } catch (err) {
-    console.error('TRACKS ERR: ', err);
-    return callback(err);
-  } finally {
-    console.log('should release');
     client.end();
+    return callback(err);
   }
 
-  console.log('NO ERRORS');
-  return callback(null, sptPlaylistId);
-}
+  // Get Artists
+  try {
+    artists = await getArtists(client, dbUser);
+    console.log('GOT ARTISTS');
+  } catch (err) {
+    client.end();
+    return callback(err);
+  }
 
-exports.handler = main;
+  // Get Tracks
+  try {
+    await getTracks(client, artists, dbUser.username, dbUser.sptplaylistid);
+    console.log('CREATED TRACKS');
+  } catch (err) {
+    client.end();
+    return callback(err);
+  }
+
+  client.end();
+  console.log('THERE WERE NO ERRORS');
+  return callback();
+};
+
+exports.handler = handler;
