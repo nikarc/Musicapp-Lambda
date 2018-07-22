@@ -8,6 +8,7 @@ const seatgeekAuth = `client_id=${SEATGEEK_API_KEY}`;
 let sptplaylistid;
 let playlistId;
 let accessToken;
+let oldTracksRows;
 
 // Helper
 function setToMondayOfNextWeek(date) {
@@ -22,6 +23,8 @@ function setToMondayOfNextWeek(date) {
     // set to monday of next week
     date.setDate(date.getDate() + 7);
   }
+
+  return date;
 }
 
 const createPlaylist = async function createPlaylist(client, user) {
@@ -61,7 +64,9 @@ const createPlaylist = async function createPlaylist(client, user) {
 
       if (!existingPlaylist) {
         // Create db playlist
-        const { rows } = await client.query('INSERT INTO playlists (userid, sptusername, sptplaylistid) VALUES ($1, $2, $3) ON CONFLICT (sptusername) DO NOTHING RETURNING id', [user.id, username, sptplaylistid]);
+        const expiresatDate = setToMondayOfNextWeek(new Date());
+        expiresatDate.setDate(expiresatDate.getDate() - 1); // Set to next upcoming Sunday
+        const { rows } = await client.query('INSERT INTO playlists (userid, sptusername, sptplaylistid, expiresat) VALUES ($1, $2, $3) ON CONFLICT (sptusername) DO NOTHING RETURNING id', [user.id, username, sptplaylistid, expiresatDate]);
         const [playlist] = rows;
         playlistId = playlist.id;
       } else {
@@ -129,7 +134,8 @@ const getArtists = async function getArtists(client, user) {
 const insertTracksToDB = async (tracks, eventId, client) => {
   const insertPromises = tracks.map(async (t) => {
     try {
-      const { rows: oldTracksRows } = await client.query('SELECT id FROM tracks WHERE playlist = $1', [playlistId]);
+      // Get old tracks to delete later
+      ({ rows: oldTracksRows } = await client.query('SELECT id FROM tracks WHERE playlist = $1', [playlistId]));
       const q = `INSERT INTO
                     tracks(title, href, sptid, uri, sptartistsids, sptalbumsids, seatgeekeventid, playlist)
                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`;
@@ -137,11 +143,6 @@ const insertTracksToDB = async (tracks, eventId, client) => {
       const artistsIdMap = t.artists.map(a => a.id).join(':');
       const values = [t.name, t.href, t.id, t.uri, artistsIdMap, t.album.id, eventId, playlistId];
       await client.query(q, values);
-
-      // Remove old tracks
-      const removeValues = oldTracksRows.map(i => i.id).join(',');
-      console.log('REMOVE VALUES: ', removeValues);
-      client.query('DELETE FROM tracks WHERE id IN ()', [removeValues]);
 
       return Promise.resolve();
     } catch (err) {
@@ -151,6 +152,7 @@ const insertTracksToDB = async (tracks, eventId, client) => {
 
   try {
     await Promise.all(insertPromises);
+
     return Promise.resolve();
   } catch (err) {
     console.error('Insert tracks error: ', err);
@@ -201,7 +203,7 @@ const addTracksToPlaylist = async (uris, username, removeOldTracks = false) => {
   }
 };
 
-const getTracks = async function getTracks(client, artists, username, playlistId) {
+const getTracks = async function getTracks(client, artists, username) {
   // Iterate through artists and get top tracks
   // console.log('artists: ', artists);
   const sptArtists = [];
@@ -272,6 +274,11 @@ const getTracks = async function getTracks(client, artists, username, playlistId
     await Promise.all(topTracksProimses);
     // Add tracks to spotify playlist
     await addTracksToPlaylist(trackUris, username, !!playlistId);
+
+    // Remove old tracks
+    const removeValues = oldTracksRows.map(i => i.id).join(',');
+    console.log('REMOVE VALUES: ', removeValues);
+    client.query(`DELETE FROM tracks WHERE id IN (${removeValues})`);
   } catch (err) {
     console.error('Top tracks error: ', err);
     return Promise.reject();
