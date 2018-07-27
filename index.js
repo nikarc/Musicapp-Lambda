@@ -20,11 +20,42 @@ function setToMondayOfNextWeek(date) {
     const difference = day - 1;
     // set to monday
     date.setDate(date.getDate() - difference);
-    // set to monday of next week
-    date.setDate(date.getDate() + 7);
   }
+  // set to monday of next week
+  date.setDate(date.getDate() + 7);
 
   return date;
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function spotifyWrapper(url, method = 'GET', body = {}, tries = 10) {
+  if (tries === 0) return Promise.reject(new Error('Timedout, too many 502 responses'));
+  if (tries > 0) await delay(500);
+
+  const sptBody = {
+    method,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+  };
+  if (method !== 'GET') sptBody.body = JSON.stringify(body);
+  const spotifyRes = await fetch(`https://api.spotify.com/v1/${url}`, sptBody);
+  if (spotifyRes.status === 502) {
+    console.log('502 tries: ', tries);
+    // Retry
+    tries -= 1;
+    return spotifyWrapper(url, method, body, tries);
+  }
+
+  const json = await spotifyRes.json();
+
+  if (!spotifyRes.ok) return Promise.reject(json);
+
+  return Promise.resolve(json);
 }
 
 const createPlaylist = async function createPlaylist(client, user) {
@@ -33,21 +64,24 @@ const createPlaylist = async function createPlaylist(client, user) {
   if (!sptplaylistid) {
     try {
       // Create spotify playlist
-      const sptPlaylistRes = await fetch(`https://api.spotify.com/v1/users/${username}/playlists`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          name: 'Upcoming Artists In Your Area',
-          public: false,
-        }),
+      // const sptPlaylistRes = await fetch(`https://api.spotify.com/v1/users/${username}/playlists`, {
+      //   method: 'POST',
+      //   headers: {
+      //     Authorization: `Bearer ${accessToken}`,
+      //     'Content-Type': 'application/json',
+      //   },
+      //   body: JSON.stringify({
+      //     name: 'Upcoming Artists In Your Area',
+      //     public: false,
+      //   }),
+      // });
+      const sptPlaylistJson = await spotifyWrapper(`${username}/playlists`, 'POST', {
+        name: 'Upcoming Artists In Your Area',
+        public: false,
       });
-      const sptPlaylistJson = await sptPlaylistRes.json();
 
-      if (!sptPlaylistRes.ok) return Promise.reject(sptPlaylistJson);
-      console.log('PLAYLIST: ', sptPlaylistJson.id);
+      // if (!sptPlaylistRes.ok) return Promise.reject(sptPlaylistJson);
+      // console.log('PLAYLIST: ', sptPlaylistJson.id);
 
       sptplaylistid = sptPlaylistJson.id;
     } catch (err) {
@@ -64,9 +98,10 @@ const createPlaylist = async function createPlaylist(client, user) {
 
       if (!existingPlaylist) {
         // Create db playlist
-        const expiresatDate = setToMondayOfNextWeek(new Date());
+        const expiresatDate = new Date();
+        setToMondayOfNextWeek(expiresatDate);
         expiresatDate.setDate(expiresatDate.getDate() - 1); // Set to next upcoming Sunday
-        const { rows } = await client.query('INSERT INTO playlists (userid, sptusername, sptplaylistid, expiresat) VALUES ($1, $2, $3) ON CONFLICT (sptusername) DO NOTHING RETURNING id', [user.id, username, sptplaylistid, expiresatDate]);
+        const { rows } = await client.query('INSERT INTO playlists (userid, sptusername, sptplaylistid, expiresat) VALUES ($1, $2, $3, $4) ON CONFLICT (sptusername) DO NOTHING RETURNING id', [user.id, username, sptplaylistid, expiresatDate]);
         const [playlist] = rows;
         playlistId = playlist.id;
       } else {
@@ -165,36 +200,41 @@ const addTracksToPlaylist = async (uris, username, removeOldTracks = false) => {
     // Remove old tracks if playlist already created
     if (removeOldTracks) {
       // First get query playlist and map track uris
-      const playlistRes = await fetch(`https://api.spotify.com/v1/users/${username}/playlists/${sptplaylistid}/tracks`, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      });
-      const playlistJson = await playlistRes.json();
+      // const playlistRes = await fetch(`https://api.spotify.com/v1/users/${username}/playlists/${sptplaylistid}/tracks`, {
+      //   headers: {
+      //     Authorization: `Bearer ${accessToken}`,
+      //   },
+      // });
+      // const playlistJson = await playlistRes.json();
 
-      if (!playlistRes.ok) return Promise.reject(playlistJson);
+      // if (!playlistRes.ok) return Promise.reject(playlistJson);
+
+      const playlistJson = await spotifyWrapper(`users/${username}/playlists/${sptplaylistid}/tracks`);
 
       // Map tracks
       const removeTrackUris = playlistJson.items.map((t) => { return { uri: t.track.uri } });
       console.log('REMOVE TRACKS URIS: ', removeTrackUris);
 
-      await fetch(`https://api.spotify.com/v1/users/${username}/playlists/${sptplaylistid}/tracks`, {
-        method: 'DELETE',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ tracks: removeTrackUris }),
-      });
+      // await fetch(`https://api.spotify.com/v1/users/${username}/playlists/${sptplaylistid}/tracks`, {
+      //   method: 'DELETE',
+      //   headers: {
+      //     Authorization: `Bearer ${accessToken}`,
+      //     'Content-Type': 'application/json',
+      //   },
+      //   body: JSON.stringify({ tracks: removeTrackUris }),
+      // });
+      await spotifyWrapper(`users/${username}/playlists/${sptplaylistid}/tracks`, 'DELETE', { tracks: removeTrackUris });
     }
-    await fetch(`https://api.spotify.com/v1/users/${username}/playlists/${sptplaylistid}/tracks`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ uris }),
-    });
+    // await fetch(`https://api.spotify.com/v1/users/${username}/playlists/${sptplaylistid}/tracks`, {
+    //   method: 'POST',
+    //   headers: {
+    //     Authorization: `Bearer ${accessToken}`,
+    //     'Content-Type': 'application/json',
+    //   },
+    //   body: JSON.stringify({ uris }),
+    // });
+
+    await spotifyWrapper(`users/${username}/playlists/${sptplaylistid}/tracks`, 'POST', { uris });
 
     return Promise.resolve();
   } catch (err) {
@@ -210,20 +250,22 @@ const getTracks = async function getTracks(client, artists, username) {
   const trackPromises = Object.keys(artists).map(async (eventId) => {
     const [a] = artists[eventId];
     const searchQuery = `artist:${encodeURIComponent(a.name)}&type=artist`;
-    const url = `https://api.spotify.com/v1/search?q=${searchQuery}`;
-    console.log('the url: ', url);
-    const artistSearchRes = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
-    });
-    const artistSearchJson = await artistSearchRes.json();
+    // const url = `https://api.spotify.com/v1/search?q=${searchQuery}`;
+    // console.log('the url: ', url);
+    // const artistSearchRes = await fetch(url, {
+    //   method: 'GET',
+    //   headers: {
+    //     Authorization: `Bearer ${accessToken}`,
+    //   },
+    // });
+    // const artistSearchJson = await artistSearchRes.json();
 
-    if (!artistSearchRes.ok) {
-      console.error('Artist search error: ', artistSearchJson);
-      return Promise.reject(artistSearchJson);
-    }
+    // if (!artistSearchRes.ok) {
+    //   console.error('Artist search error: ', artistSearchJson);
+    //   return Promise.reject(artistSearchJson);
+    // }
+
+    const artistSearchJson = await spotifyWrapper(`search?q=${searchQuery}`);
 
     const artist = artistSearchJson.artists.items[0];
     if (artist) {
@@ -245,16 +287,18 @@ const getTracks = async function getTracks(client, artists, username) {
   console.log('spt artist length: ', sptArtists.length);
   const topTracksProimses = sptArtists.map(async (a) => {
     try {
-      const topTracksRes = await fetch(`https://api.spotify.com/v1/artists/${a.id}/top-tracks?country=US`, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      });
-      const topTracksJson = await topTracksRes.json();
+      // const topTracksRes = await fetch(`https://api.spotify.com/v1/artists/${a.id}/top-tracks?country=US`, {
+      //   headers: {
+      //     Authorization: `Bearer ${accessToken}`,
+      //   },
+      // });
+      // const topTracksJson = await topTracksRes.json();
 
-      if (!topTracksRes.ok) {
-        return Promise.reject(topTracksJson);
-      }
+      // if (!topTracksRes.ok) {
+      //   return Promise.reject(topTracksJson);
+      // }
+
+      const topTracksJson = await spotifyWrapper(`artists/${a.id}/top-tracks?country=US`);
 
       const { tracks } = topTracksJson;
       if (!(tracks && tracks.length)) return Promise.resolve();

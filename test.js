@@ -7,7 +7,7 @@ const pool = new Pool();
 const user = {
   username: 'nikarc321',
   city: 'Brooklyn',
-  playlistId: '1Y3WTcvU7RwZ6JQQlv7PPl',
+  // playlistId: '1Y3WTcvU7RwZ6JQQlv7PPl',
 };
 
 (async () => {
